@@ -1,0 +1,124 @@
+---
+title: "TESI LDA"
+author: "Eugenia Giampetruzzi"
+date: "`r format(Sys.Date())`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+
+#set-up
+```{r setup, message=FALSE, warning=FALSE}
+root <- "/Users/eu/lda_project"
+setwd(root)
+
+pkgs <- c(
+  "tidyverse","data.table","janitor","scales",
+  "RColorBrewer","ggrepel","patchwork",
+  "proxy","dendextend","wordcloud"
+)
+for(p in pkgs) if(!requireNamespace(p, quietly=TRUE)) install.packages(p)
+invisible(lapply(pkgs, library, character.only=TRUE))
+
+dir.create(file.path(root,"analysis"), showWarnings = FALSE, recursive = TRUE)
+dir.create(file.path(root,"analysis","figs"), showWarnings = FALSE, recursive = TRUE)
+dir.create(file.path(root,"exports"), showWarnings = FALSE, recursive = TRUE)
+
+# file paths
+lex_csv   <- "exports/ELS_30_a3_s200_topic_words.csv"
+keys_csv  <- "exports/ELS_30_a3_s200_topic_keys.csv"
+docs_csv  <- "exports/ELS_30_a3_s200_doc_topics_with_ids.csv"
+
+```
+
+```{r setup, message=FALSE, warning=FALSE}
+lex <- readr::read_csv(lex_csv, show_col_types = FALSE) |> clean_names()
+keys <- readr::read_csv(keys_csv, show_col_types = FALSE) |> clean_names()
+docs <- readr::read_csv(docs_csv, show_col_types = FALSE) |> clean_names()
+
+lex <- lex |> mutate(topic = as.integer(str_replace(as.character(topic), "^topic_", "")))
+keys <- keys |> mutate(topic = as.integer(topic))
+docs <- docs |> mutate(across(where(is.double), ~ .x))  # keep numerics
+
+# doc sums ~ 1?
+row_sums <- docs |> select(-message_id, -user_id) |> rowSums()
+summary(row_sums)
+```
+
+```{r, top words, message=FALSE, warning=FALSE}
+# top 5 words from MALLET keys
+labels <- keys |>
+  separate_rows(top_words, sep = "\\s+") |>
+  group_by(topic) |>
+  summarise(label = paste(head(top_words, 5), collapse = " "), .groups="drop")
+
+head(labels, 10)
+```
+
+#kmeans clustering
+```{r}
+
+k_reduced <- 5
+cluster_map <- tibble(topic = topic_ids,
+                      cluster = cutree(hc, k = k_reduced)) %>%
+  arrange(cluster, topic)
+
+doc_long <- docs %>%
+  tidyr::pivot_longer(-c(message_id, user_id), names_to = "topic", values_to = "wt") %>%
+  mutate(topic = as.integer(topic))
+
+doc_cluster <- doc_long %>%
+  inner_join(cluster_map, by = "topic") %>%
+  group_by(message_id, user_id, cluster) %>%
+  summarise(wt = sum(wt), .groups="drop") %>%
+  tidyr::complete(message_id, user_id,
+                  cluster = 1:max(cluster_map$cluster),
+                  fill = list(wt = 0))
+
+doc_cluster_wide <- doc_cluster %>%
+  tidyr::pivot_wider(names_from = cluster, values_from = wt, names_prefix = "c") %>%
+  arrange(user_id, message_id)
+
+lex_cluster <- lex %>%
+  mutate(topic_id = as.integer(stringr::str_replace(as.character(topic), "^topic_", ""))) %>%
+  inner_join(cluster_map, by = c("topic_id" = "topic")) %>%
+  group_by(cluster, term) %>%
+  summarise(weight = sum(weight), .groups="drop")
+
+cluster_labels <- lex_cluster %>%
+  group_by(cluster) %>%
+  slice_max(order_by = weight, n = 10, with_ties = FALSE) %>%
+  summarise(label = paste(term, collapse = " "), .groups="drop") %>%
+  arrange(cluster)
+
+knitr::kable(cluster_labels, caption = "cluster labels (k = 6)")
+```
+
+```{r}
+library(dplyr)
+library(knitr)
+
+# cluster → label + theme
+label_map <- tribble(
+  ~cluster, ~Label,                   ~Theme,
+  1, "Loss and Grief",                "References to death, sadness, and experiences of loss.",
+  2, "Sports and Daily Routines",     "Language about sports, structured activities, and time.",
+  3, "Crying and Conflict",           "Emotional distress and interpersonal conflict at home.",
+  4, "Games and School",              "Mentions of gaming, school performance, and grades.",
+  5, "Mistreatment and Fighting",     "Perceived mistreatment, neglect, or fighting."
+)
+
+# top words from cluster_labels
+cluster_summary <- cluster_labels %>%
+  left_join(label_map, by = "cluster") %>%
+  rename(`Top Words` = label) %>%
+  select(cluster, Label, `Top Words`, Theme)
+
+cluster_summary %>%
+  arrange(cluster) %>%
+  kable(caption = "Cluster labels (k = 5)")
+```
+
